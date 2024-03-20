@@ -1,6 +1,5 @@
 ccxt==4.1.91
-pandas==2.1.4
-pandas-ta==0.3.14b0
+pandas
 scipy
 seaborn
 statsmodels

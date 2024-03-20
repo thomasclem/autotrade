@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import itertools
 from tqdm import tqdm
 
-pair = "API3/USDT:USDT"
+pair = "BNB/USDT:USDT"
 exchange_name = "binance"
 tf = '15m'
 train_start_date = "2023-01-01 00:00:00"
