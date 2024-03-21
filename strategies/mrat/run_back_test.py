@@ -98,71 +98,71 @@ class Strategy():
         df_order['quantity'] = 0.0
         df_order['trade_result'] = 0.0
         df_order['trade_result_pct'] = 0.0
+        try:
+            # Iterating over DataFrame rows to process trading signals
+            for i, row in df_order.iterrows():
+                # Check if there is a signal to open a long position
+                if row['open_long_signal']:
+                    # Calculate the new quantity based on the current wallet and leverage
+                    quantity = wallet * leverage / row['open']
+                    # Update the 'quantity' column with the new quantity
+                    df_order.at[i, 'quantity'] = quantity
+                    # No change in wallet yet as the position has just opened
+                    df_order.at[i, 'wallet'] = wallet
+                    # Track the price at which the position was opened
+                    open = row['open']
+                elif row['close_long_signal']:
+                    # Calculate the trade result based on the difference between current and open price
+                    trade_result = (row['open'] - open) * quantity
+                    # Update the 'trade_result' column with the result of the closed trade
+                    df_order.at[i, 'trade_result'] = trade_result
+                    df_order.at[i, 'trade_result_pct'] = trade_result / wallet * 100
+                    # Update the wallet with the result of the trade
+                    wallet += trade_result
+                    # Reset quantity as the trade is closed
+                    df_order.at[i, 'quantity'] = quantity
+                    quantity = 0
 
-        # Iterating over DataFrame rows to process trading signals
-        for i, row in df_order.iterrows():
-            # Check if there is a signal to open a long position
-            if row['open_long_signal']:
-                # Calculate the new quantity based on the current wallet and leverage
-                quantity = wallet * leverage / row['open']
-                # Update the 'quantity' column with the new quantity
-                df_order.at[i, 'quantity'] = quantity
-                # No change in wallet yet as the position has just opened
+                # Update the wallet and quantity for the current row
                 df_order.at[i, 'wallet'] = wallet
-                # Track the price at which the position was opened
-                open = row['open']
-            elif row['close_long_signal']:
-                # Calculate the trade result based on the difference between current and open price
-                trade_result = (row['open'] - open) * quantity
-                # Update the 'trade_result' column with the result of the closed trade
-                df_order.at[i, 'trade_result'] = trade_result
-                df_order.at[i, 'trade_result_pct'] = trade_result / wallet * 100
-                # Update the wallet with the result of the trade
-                wallet += trade_result
-                # Reset quantity as the trade is closed
-                df_order.at[i, 'quantity'] = quantity
-                quantity = 0
 
-            # Update the wallet and quantity for the current row
-            df_order.at[i, 'wallet'] = wallet
+            df_order_tmp = df_order[
+                ["order_number", "quantity", "trade_result", "trade_result_pct", "wallet", "open_order"]
+            ]
+            df_pair = df[
+                ["open", "close", "low", "high", "mrat", "mean_mrat", "stdev_mrat", "open_long_signal", "close_long_signal"]
+             ]
+            df_order_final = df_pair.join(df_order_tmp)
 
-        df_order_tmp = df_order[
-            ["order_number", "quantity", "trade_result", "trade_result_pct", "wallet", "open_order"]
-        ]
-        df_pair = df[
-            ["open", "close", "low", "high", "mrat", "mean_mrat", "stdev_mrat", "open_long_signal", "close_long_signal"]
-         ]
-        df_order_final = df_pair.join(df_order_tmp)
+            f = df_order_final['order_number'].ffill()
+            b = df_order_final['order_number'].bfill()
 
-        f = df_order_final['order_number'].ffill()
-        b = df_order_final['order_number'].bfill()
+            df_order_final['order_number'] = df_order_final['order_number'].mask(f == b, f)
 
-        df_order_final['order_number'] = df_order_final['order_number'].mask(f == b, f)
+            f = df_order_final['open_order'].ffill()
+            b = df_order_final['open_order'].bfill()
 
-        f = df_order_final['open_order'].ffill()
-        b = df_order_final['open_order'].bfill()
+            df_order_final['open_order'] = df_order_final['open_order'].mask(f == b, f)
+            df_order_final['wallet'] = df_order_final['wallet'].ffill()
+            df_order_final["hypothetical_wallet"] = df_order_final["wallet"].shift() + df_order_final["quantity"] * (
+                        df_order_final['open'] - df_order_final["open_order"])
+            df_order_final["hypothetical_low_result"] = ((df_order_final["quantity"] * df_order_final["low"]) -
+                                                         df_order_final["wallet"]) / df_order_final["wallet"]
+            df_order_final["drawdown"] = (df_order_final["low"] - df_order_final["open_order"]) / df_order_final[
+                "open_order"] * 100 * leverage
+            df_order_final["is_liquidated"] = df_order_final['hypothetical_wallet'] < (
+                        df_order_final["wallet"] / leverage) * maintenance_margin_percent
 
-        df_order_final['open_order'] = df_order_final['open_order'].mask(f == b, f)
-        df_order_final['wallet'] = df_order_final['wallet'].ffill()
-        df_order_final["hypothetical_wallet"] = df_order_final["wallet"].shift() + df_order_final["quantity"] * (
-                    df_order_final['open'] - df_order_final["open_order"])
-        df_order_final["hypothetical_low_result"] = ((df_order_final["quantity"] * df_order_final["low"]) -
-                                                     df_order_final["wallet"]) / df_order_final["wallet"]
-        df_order_final["drawdown"] = (df_order_final["low"] - df_order_final["open_order"]) / df_order_final[
-            "open_order"] * 100 * leverage
-        df_order_final["is_liquidated"] = df_order_final['hypothetical_wallet'] < (
-                    df_order_final["wallet"] / leverage) * maintenance_margin_percent
-
-        self.df = df_order_final
+            self.df = df_order_final
+        except Exception as e:
+            print(params)
+            print(e)
+            self.df = None
 
     def get_result_df(self):
         df = self.df
         total_trades = df.order_number.max()
         try:
-            df["wallet"]
-        except Exception as e:
-            print(self.params)
-        if total_trades > 0:
             final_wallet_amount = df.loc[df["open_long_signal"], "wallet"].tail(1)
             total_profit = final_wallet_amount - self.initial_wallet
             total_profit_perc = total_profit / self.initial_wallet * 100
@@ -184,7 +184,9 @@ class Strategy():
             )
 
             self.result_df = result_df
-        else:
+        except Exception as e:
+            print(str(e))
+            print(f"Params: {self.params}")
             self.result_df = None
 
 
