@@ -6,12 +6,14 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import itertools
 from tqdm import tqdm
 
-pair = "BNB/USDT:USDT"
+pair = "API3/USDT:USDT"
 exchange_name = "binance"
 tf = '15m'
 train_start_date = "2023-01-01 00:00:00"
 train_end_date = "2023-12-31 00:00:00"
 test_start_date = "2023-12-31 00:00:00"
+
+pd.options.mode.chained_assignment = None  # default='warn'
 
 
 class Strategy():
@@ -40,103 +42,150 @@ class Strategy():
 
     def populate_indicators(self):
         params = self.params
-        df = self.df_pair
+        df = self.df_pair.copy()
         df.drop(
-            columns=df.columns.difference(['open','high','low','close','volume']),
+            columns=df.columns.difference(['open', 'high', 'low', 'close', 'volume']),
             inplace=True
         )
-
-        # -- Populate indicators --
         df['fast_ma'] = ta.trend.sma_indicator(close=df["close"], window=params["fast_ma"])
         df['slow_ma'] = ta.trend.sma_indicator(close=df["close"], window=params["slow_ma"])
         df['mrat'] = df['fast_ma'] / df['slow_ma']
         df['mean_mrat'] = ta.trend.sma_indicator(close=df['mrat'], window=params["mean_mrat_lenght"])
         df['stdev_mrat'] = df['mrat'].rolling(params["mean_mrat_lenght"]).std(ddof=0)
-        df['open_long_signal'] = df['mean_mrat'].shift(1) - df['mrat'].shift(1) >= params['sigma_open'] * df['stdev_mrat'].shift(1)
-        df['close_long_signal'] = df['mrat'].shift(1) - df['mean_mrat'].shift(1) >= params['sigma_close'] * df['stdev_mrat'].shift(1)
+        df['open_long_signal'] = df['mean_mrat'].shift(1) - df['mrat'].shift(1) >= params['sigma_open'] * df[
+            'stdev_mrat'].shift(1)
+        df['close_long_signal'] = df['mrat'].shift(1) - df['mean_mrat'].shift(1) >= params['sigma_close'] * df[
+            'stdev_mrat'].shift(1)
 
-        df["is_liquidated"] = False
-        df["order_open"] = False
-        # Trading logic
-        order_open = False
-        current_order_number = 0
-        open_price = 0
-        quantity = 0
-        trade_result = 0
-        # Constants and Initialization
-        initial_wallet = self.initial_wallet
-        leverage = 1  # Fixed leverage
+        df_signal = df.loc[
+            df["open_long_signal"] | df["close_long_signal"],
+            ["open_long_signal", "close_long_signal", "open", "close"]
+        ]
+        df_signal["open_signal_lag"] = df_signal["open_long_signal"].shift(fill_value=False)
+        df_signal["close_signal_lag"] = df_signal["close_long_signal"].shift(fill_value=False)
+        df_first_signal = df_signal[
+            (~ df_signal["open_signal_lag"] & (
+                        df_signal["open_long_signal"] | df_signal["open_long_signal"].isnull())) |
+            (~ df_signal["close_signal_lag"] & df_signal["close_long_signal"])
+            ]
+        df_first_signal["open_signal_lag"] = df_first_signal["open_long_signal"].shift(fill_value=False)
+        df_first_signal["close_signal_lag"] = df_first_signal["close_long_signal"].shift(fill_value=False)
+
+        df_order_tmp = df_first_signal[
+            (df_first_signal["open_long_signal"] & (
+                        ~df_first_signal["open_signal_lag"] | df_first_signal["open_long_signal"].isnull())) |
+            (df_first_signal["close_long_signal"] & ~ df_first_signal["close_signal_lag"])
+            ]
+        df_order = df_order_tmp.loc[
+            ~ (
+                    ~ df_order_tmp["close_signal_lag"] &
+                    ~ df_order_tmp["open_signal_lag"] &
+                    df_order_tmp["close_long_signal"]
+            )
+        ]
+        df_order["order_number"] = df_order["open_long_signal"].cumsum()
+        df_order["open_lag"] = df_order["open"].shift(-1)
+        df_order["open_order"] = df_order["open"].shift()
+        df_order.loc[df_order["open_long_signal"], "open_order"] = df_order.loc[df_order["open_long_signal"], "open"]
+
+        leverage = params["leverage"]  # Fixed leverage
         maintenance_margin_percent = 0.004
-        wallet = initial_wallet
+        wallet = 1000  # Initial wallet balance
+        quantity = 0  # Initial quantity
+        open = 0
 
-        for i in df.index:
-            if df.at[i, 'open_long_signal'] and not order_open:
-                # Open a new order
-                current_order_number += 1
-                order_open = True
-                open_price = df.at[i, 'open']
-                open_wallet = df.at[i, 'wallet']
-                quantity = (wallet / open_price) * leverage
-                df.at[i, 'order_number'] = current_order_number
-                df.at[i, 'order_open'] = order_open
+        # Ensure the DataFrame has 'quantity' and 'trade_result' columns initialized
+        df_order['quantity'] = 0.0
+        df_order['trade_result'] = 0.0
+        df_order['trade_result_pct'] = 0.0
 
-            # Assign order_number to all rows of the current order
-            if order_open:
-                df.at[i, 'order_number'] = current_order_number
-                df.at[i, 'order_open'] = order_open
-                # Calculate hypothetical_wallet
-                hypothetical_wallet = wallet + quantity * (df.at[i, 'open'] - open_price)
-                df.at[i, 'hypothetical_wallet'] = hypothetical_wallet
-                df.at[i, 'quantity'] = quantity
+        # Iterating over DataFrame rows to process trading signals
+        for i, row in df_order.iterrows():
+            # Check if there is a signal to open a long position
+            if row['open_long_signal']:
+                # Calculate the new quantity based on the current wallet and leverage
+                quantity = wallet * leverage / row['open']
+                # Update the 'quantity' column with the new quantity
+                df_order.at[i, 'quantity'] = quantity
+                # No change in wallet yet as the position has just opened
+                df_order.at[i, 'wallet'] = wallet
+                # Track the price at which the position was opened
+                open = row['open']
+            elif row['close_long_signal']:
+                # Calculate the trade result based on the difference between current and open price
+                trade_result = (row['open'] - open) * quantity
+                # Update the 'trade_result' column with the result of the closed trade
+                df_order.at[i, 'trade_result'] = trade_result
+                df_order.at[i, 'trade_result_pct'] = trade_result / wallet * 100
+                # Update the wallet with the result of the trade
+                wallet += trade_result
+                # Reset quantity as the trade is closed
+                df_order.at[i, 'quantity'] = quantity
+                quantity = 0
 
-                # Check for liquidation
-                maintenance_margin = (wallet / leverage) * maintenance_margin_percent
-                if hypothetical_wallet < maintenance_margin:
-                    df.at[i, 'is_liquidated'] = True
-                    df.at[i, 'trade_result'] = hypothetical_wallet - wallet
-                    wallet = 0  # Update wallet with the loss
-                    order_open = False  # Close the order
+            # Update the wallet and quantity for the current row
+            df_order.at[i, 'wallet'] = wallet
 
-            # Close the order
-            if df.at[i, 'close_long_signal'] and order_open:
-                trade_result = quantity * (df.at[i, 'open'] - open_price)
-                trade_result_perc = trade_result / open_wallet * 100
-                wallet += trade_result  # Update wallet with the profit or loss
-                order_open = False  # Close the order
-                df.at[i, 'trade_result'] = trade_result
-                df.at[i, 'trade_result_perc'] = trade_result_perc
+        df_order_tmp = df_order[
+            ["order_number", "quantity", "trade_result", "trade_result_pct", "wallet", "open_order"]
+        ]
+        df_pair = df[
+            ["open", "close", "low", "high", "mrat", "mean_mrat", "stdev_mrat", "open_long_signal", "close_long_signal"]
+         ]
+        df_order_final = df_pair.join(df_order_tmp)
 
-            # Set wallet to current wallet value
-            df.at[i, 'wallet'] = wallet
+        f = df_order_final['order_number'].ffill()
+        b = df_order_final['order_number'].bfill()
 
-        df["drawdown"] = (df["hypothetical_wallet"] - df["wallet"]) / df["wallet"] * 100
+        df_order_final['order_number'] = df_order_final['order_number'].mask(f == b, f)
 
-        self.df = df
+        f = df_order_final['open_order'].ffill()
+        b = df_order_final['open_order'].bfill()
+
+        df_order_final['open_order'] = df_order_final['open_order'].mask(f == b, f)
+        df_order_final['wallet'] = df_order_final['wallet'].ffill()
+        df_order_final["hypothetical_wallet"] = df_order_final["wallet"].shift() + df_order_final["quantity"] * (
+                    df_order_final['open'] - df_order_final["open_order"])
+        df_order_final["hypothetical_low_result"] = ((df_order_final["quantity"] * df_order_final["low"]) -
+                                                     df_order_final["wallet"]) / df_order_final["wallet"]
+        df_order_final["drawdown"] = (df_order_final["low"] - df_order_final["open_order"]) / df_order_final[
+            "open_order"] * 100 * leverage
+        df_order_final["is_liquidated"] = df_order_final['hypothetical_wallet'] < (
+                    df_order_final["wallet"] / leverage) * maintenance_margin_percent
+
+        self.df = df_order_final
 
     def get_result_df(self):
         df = self.df
-        final_wallet_amount = df.loc[df["order_open"] & df["close_long_signal"], "wallet"].tail(1)
-        total_profit = final_wallet_amount - self.initial_wallet
-        total_profit_perc = total_profit / self.initial_wallet * 100
-        total_trades = df["order_number"].max()
-        avg_trade_profit_perc = df["trade_result_perc"].dropna().mean()
-        avg_trade_profit = df["trade_result"].dropna().mean()
-        max_drawdown = df["drawdown"].min()
+        total_trades = df.order_number.max()
+        try:
+            df["wallet"]
+        except Exception as e:
+            print(self.params)
+        if total_trades > 0:
+            final_wallet_amount = df.loc[df["open_long_signal"], "wallet"].tail(1)
+            total_profit = final_wallet_amount - self.initial_wallet
+            total_profit_perc = total_profit / self.initial_wallet * 100
+            avg_trade_profit_perc = df["trade_result_pct"].dropna().mean()
+            avg_trade_profit = df["trade_result"].dropna().mean()
+            max_drawdown = df["drawdown"].min()
 
-        result_df = pd.DataFrame(
-            {
-                "params": str(self.params),
-                "final_wallet_amount": final_wallet_amount,
-                "total_profit": total_profit,
-                "total_profit_perc": total_profit_perc,
-                "total_trades": total_trades,
-                "avg_trade_profit_perc": avg_trade_profit_perc,
-                "avg_trade_profit": avg_trade_profit,
-                "max_drawdown": max_drawdown,
-            }
-        )
+            result_df = pd.DataFrame(
+                {
+                    "params": str(self.params),
+                    "final_wallet_amount": final_wallet_amount,
+                    "total_profit": total_profit,
+                    "total_profit_perc": total_profit_perc,
+                    "total_trades": total_trades,
+                    "avg_trade_profit_perc": avg_trade_profit_perc,
+                    "avg_trade_profit": avg_trade_profit,
+                    "max_drawdown": max_drawdown,
+                }
+            )
 
-        self.result_df = result_df
+            self.result_df = result_df
+        else:
+            self.result_df = None
 
 
 def execute_strategy(batch):
@@ -148,26 +197,28 @@ def execute_strategy(batch):
             "slow_ma": sma,
             "sigma_open": sgo,
             "sigma_close": sgc,
-            "mean_mrat_lenght": sma
+            "mean_mrat_lenght": sma,
+            "leverage": 1
         }
         strat = Strategy(
             pair=pair,
             type=["long"],
             params=params
         )
-        strat.get_pair_data(timeframe=tf, start=train_start_date)
+        strat.get_pair_data(timeframe=tf, start=train_start_date, end=train_end_date)
         strat.populate_indicators()
         strat.get_result_df()
-        results.append(strat.result_df)
+        if len(strat.result_df) > 0:
+            results.append(strat.result_df)
 
     return results
 
 
 def main():
-    fast_ma = [*np.arange(5, 11, 1), *np.arange(15, 40, 5)]
-    slow_ma = np.arange(60, 145, 5)
-    sigma_open = np.arange(2, 3, 0.1)
-    sigma_close = np.arange(2, 3, 0.1)
+    fast_ma = [*np.arange(5, 11, 1), *np.arange(15, 80, 5)]
+    slow_ma = np.arange(60, 180, 5)
+    sigma_open = np.arange(1, 3, 0.1)
+    sigma_close = np.arange(1, 3, 0.1)
     #fast_ma = [*np.arange(5, 6, 1)]
     #slow_ma = np.arange(60, 70, 5)
     #sigma_open = np.arange(2, 3, 0.2)
@@ -175,7 +226,7 @@ def main():
 
     param_combinations = list(itertools.product(fast_ma, slow_ma, sigma_open, sigma_close))
 
-    batch_size = 20  # or another number that works well for your setup
+    batch_size = 100  # or another number that works well for your setup
     param_batches = [param_combinations[i:i + batch_size] for i in range(0, len(param_combinations), batch_size)]
     progress_bar = tqdm(total=len(param_combinations))
 
@@ -189,7 +240,9 @@ def main():
             progress_bar.update(batch_size)
 
     progress_bar.close()
-    pd.concat(result_dfs).to_csv(f"mrat_result_{pair.split('/')[0]}_{exchange_name}_{train_start_date.split(' ')[0]}.csv")
+    pd.concat(result_dfs).to_csv(
+        f"{pair.split('/')[0]}_{exchange_name}_{tf}_{train_start_date.split(' ')[0]}_{train_end_date.split(' ')[0]}.csv"
+    )
 
 
 if __name__ == "__main__":
