@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import itertools
 from tqdm import tqdm
 
-pair = "API3/USDT:USDT"
+pair = "ETH/USDT:USDT"
 exchange_name = "binance"
 tf = '15m'
 train_start_date = "2023-01-01 00:00:00"
@@ -38,7 +38,7 @@ class Strategy():
             path_download="./database/exchanges"
         )
 
-        self.df_pair = exchange.load_data(self.pair, timeframe, start)
+        self.df_pair = exchange.load_data(self.pair, timeframe, start, end)
 
     def populate_indicators(self):
         params = self.params
@@ -57,48 +57,49 @@ class Strategy():
         df['close_long_signal'] = df['mrat'].shift(1) - df['mean_mrat'].shift(1) >= params['sigma_close'] * df[
             'stdev_mrat'].shift(1)
 
-        df_signal = df.loc[
-            df["open_long_signal"] | df["close_long_signal"],
-            ["open_long_signal", "close_long_signal", "open", "close"]
-        ]
-        df_signal["open_signal_lag"] = df_signal["open_long_signal"].shift(fill_value=False)
-        df_signal["close_signal_lag"] = df_signal["close_long_signal"].shift(fill_value=False)
-        df_first_signal = df_signal[
-            (~ df_signal["open_signal_lag"] & (
-                        df_signal["open_long_signal"] | df_signal["open_long_signal"].isnull())) |
-            (~ df_signal["close_signal_lag"] & df_signal["close_long_signal"])
-            ]
-        df_first_signal["open_signal_lag"] = df_first_signal["open_long_signal"].shift(fill_value=False)
-        df_first_signal["close_signal_lag"] = df_first_signal["close_long_signal"].shift(fill_value=False)
-
-        df_order_tmp = df_first_signal[
-            (df_first_signal["open_long_signal"] & (
-                        ~df_first_signal["open_signal_lag"] | df_first_signal["open_long_signal"].isnull())) |
-            (df_first_signal["close_long_signal"] & ~ df_first_signal["close_signal_lag"])
-            ]
-        df_order = df_order_tmp.loc[
-            ~ (
-                    ~ df_order_tmp["close_signal_lag"] &
-                    ~ df_order_tmp["open_signal_lag"] &
-                    df_order_tmp["close_long_signal"]
-            )
-        ]
-        df_order["order_number"] = df_order["open_long_signal"].cumsum()
-        df_order["open_lag"] = df_order["open"].shift(-1)
-        df_order["open_order"] = df_order["open"].shift()
-        df_order.loc[df_order["open_long_signal"], "open_order"] = df_order.loc[df_order["open_long_signal"], "open"]
-
-        leverage = params["leverage"]  # Fixed leverage
-        maintenance_margin_percent = 0.004
-        wallet = 1000  # Initial wallet balance
-        quantity = 0  # Initial quantity
-        open = 0
-
-        # Ensure the DataFrame has 'quantity' and 'trade_result' columns initialized
-        df_order['quantity'] = 0.0
-        df_order['trade_result'] = 0.0
-        df_order['trade_result_pct'] = 0.0
         try:
+            df_signal = df.loc[
+                df["open_long_signal"] | df["close_long_signal"],
+                ["open_long_signal", "close_long_signal", "open", "close"]
+            ]
+            df_signal["open_signal_lag"] = df_signal["open_long_signal"].shift(fill_value=False)
+            df_signal["close_signal_lag"] = df_signal["close_long_signal"].shift(fill_value=False)
+            df_first_signal = df_signal[
+                (~ df_signal["open_signal_lag"] & (
+                            df_signal["open_long_signal"] | df_signal["open_long_signal"].isnull())) |
+                (~ df_signal["close_signal_lag"] & df_signal["close_long_signal"])
+                ]
+            df_first_signal["open_signal_lag"] = df_first_signal["open_long_signal"].shift(fill_value=False)
+            df_first_signal["close_signal_lag"] = df_first_signal["close_long_signal"].shift(fill_value=False)
+
+            df_order_tmp = df_first_signal[
+                (df_first_signal["open_long_signal"] & (
+                            ~df_first_signal["open_signal_lag"] | df_first_signal["open_long_signal"].isnull())) |
+                (df_first_signal["close_long_signal"] & ~ df_first_signal["close_signal_lag"])
+                ]
+            df_order = df_order_tmp.loc[
+                ~ (
+                        ~ df_order_tmp["close_signal_lag"] &
+                        ~ df_order_tmp["open_signal_lag"] &
+                        df_order_tmp["close_long_signal"]
+                )
+            ]
+            df_order["order_number"] = df_order["open_long_signal"].cumsum()
+            df_order["open_lag"] = df_order["open"].shift(-1)
+            df_order["open_order"] = df_order["open"].shift()
+            df_order.loc[df_order["open_long_signal"], "open_order"] = df_order.loc[df_order["open_long_signal"], "open"]
+
+            leverage = params["leverage"]  # Fixed leverage
+            maintenance_margin_percent = 0.004
+            wallet = 1000  # Initial wallet balance
+            quantity = 0  # Initial quantity
+            open = 0
+
+            # Ensure the DataFrame has 'quantity' and 'trade_result' columns initialized
+            df_order['quantity'] = 0.0
+            df_order['trade_result'] = 0.0
+            df_order['trade_result_pct'] = 0.0
+
             # Iterating over DataFrame rows to process trading signals
             for i, row in df_order.iterrows():
                 # Check if there is a signal to open a long position
@@ -155,70 +156,81 @@ class Strategy():
 
             self.df = df_order_final
         except Exception as e:
-            print(params)
-            print(e)
             self.df = None
 
     def get_result_df(self):
-        df = self.df
-        total_trades = df.order_number.max()
         try:
-            final_wallet_amount = df.loc[df["open_long_signal"], "wallet"].tail(1)
-            total_profit = final_wallet_amount - self.initial_wallet
-            total_profit_perc = total_profit / self.initial_wallet * 100
-            avg_trade_profit_perc = df["trade_result_pct"].dropna().mean()
-            avg_trade_profit = df["trade_result"].dropna().mean()
-            max_drawdown = df["drawdown"].min()
+            df = self.df
+            if df is not None:
+                total_trades = df.order_number.max()
+                final_wallet_amount = df.loc[df["open_long_signal"], "wallet"].tail(1)
+                total_profit = final_wallet_amount - self.initial_wallet
+                total_profit_perc = total_profit / self.initial_wallet * 100
+                avg_trade_profit_perc = df["trade_result_pct"].dropna().mean()
+                avg_trade_profit = df["trade_result"].dropna().mean()
+                max_drawdown = df["drawdown"].min()
+                hold_profit = (
+                    df.sort_index().iloc[-1]["open"] - df.sort_index().iloc[0]["open"]
+                              ) / df.sort_index().iloc[0]["open"] * 100
 
-            result_df = pd.DataFrame(
-                {
-                    "params": str(self.params),
-                    "final_wallet_amount": final_wallet_amount,
-                    "total_profit": total_profit,
-                    "total_profit_perc": total_profit_perc,
-                    "total_trades": total_trades,
-                    "avg_trade_profit_perc": avg_trade_profit_perc,
-                    "avg_trade_profit": avg_trade_profit,
-                    "max_drawdown": max_drawdown,
-                }
-            )
+                result_df = pd.DataFrame(
+                    {
+                        "params": str(self.params),
+                        "final_wallet_amount": final_wallet_amount,
+                        "total_profit": total_profit,
+                        "total_profit_perc": total_profit_perc,
+                        "total_trades": total_trades,
+                        "avg_trade_profit_perc": avg_trade_profit_perc,
+                        "avg_trade_profit": avg_trade_profit,
+                        "max_drawdown": max_drawdown,
+                        "hold_profit": hold_profit
+                    }
+                )
 
-            self.result_df = result_df
+                self.result_df = result_df
+            else:
+                self.result_df = None
         except Exception as e:
-            print(str(e))
-            print(f"Params: {self.params}")
+            print(e)
+            print(self.params)
             self.result_df = None
 
 
 def execute_strategy(batch):
-    results = []
-    for params in batch:
-        fma, sma, sgo, sgc = params
-        params = {
-            "fast_ma": fma,
-            "slow_ma": sma,
-            "sigma_open": sgo,
-            "sigma_close": sgc,
-            "mean_mrat_lenght": sma,
-            "leverage": 1
-        }
-        strat = Strategy(
-            pair=pair,
-            type=["long"],
-            params=params
-        )
-        strat.get_pair_data(timeframe=tf, start=train_start_date, end=train_end_date)
-        strat.populate_indicators()
-        strat.get_result_df()
-        if len(strat.result_df) > 0:
-            results.append(strat.result_df)
+    try:
+        results = []
+        for params in batch:
+            fma, sma, sgo, sgc = params
+            if fma < sma:
+                params = {
+                    "fast_ma": fma,
+                    "slow_ma": sma,
+                    "sigma_open": round(sgo, 2),
+                    "sigma_close": round(sgc, 2),
+                    "mean_mrat_lenght": sma,
+                    "leverage": 1
+                }
+                strat = Strategy(
+                    pair=pair,
+                    type=["long"],
+                    params=params
+                )
+                strat.get_pair_data(timeframe=tf, start=train_start_date, end=train_end_date)
+                strat.populate_indicators()
+                strat.get_result_df()
+                if strat.result_df is not None:
+                    results.append(strat.result_df)
 
-    return results
+        if len(results) > 0:
+            return results
+    except Exception as e:
+        print(e)
+        print(params)
 
 
 def main():
-    fast_ma = [*np.arange(5, 11, 1), *np.arange(15, 80, 5)]
-    slow_ma = np.arange(60, 180, 5)
+    fast_ma = [*np.arange(5, 15, 1), *np.arange(15, 50, 5)]
+    slow_ma = np.arange(50, 150, 5)
     sigma_open = np.arange(1, 3, 0.1)
     sigma_close = np.arange(1, 3, 0.1)
     #fast_ma = [*np.arange(5, 6, 1)]
@@ -228,7 +240,7 @@ def main():
 
     param_combinations = list(itertools.product(fast_ma, slow_ma, sigma_open, sigma_close))
 
-    batch_size = 100  # or another number that works well for your setup
+    batch_size = 50  # or another number that works well for your setup
     param_batches = [param_combinations[i:i + batch_size] for i in range(0, len(param_combinations), batch_size)]
     progress_bar = tqdm(total=len(param_combinations))
 
@@ -243,7 +255,7 @@ def main():
 
     progress_bar.close()
     pd.concat(result_dfs).to_csv(
-        f"{pair.split('/')[0]}_{exchange_name}_{tf}_{train_start_date.split(' ')[0]}_{train_end_date.split(' ')[0]}.csv"
+        f"{pair.split('/')[0]}_{exchange_name}_{tf}_{train_start_date.split(' ')[0]}_{train_end_date.split(' ')[0]}_2.csv"
     )
 
 
