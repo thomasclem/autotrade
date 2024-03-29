@@ -6,10 +6,14 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import itertools
 from tqdm import tqdm
 
-pair = "ETH/USDT:USDT"
-exchange_name = "binance"
+#pair = "OCEAN/USDT:USDT"
+pair_list = [
+    "DUSK/USDT:USDT",
+    "ATOM/USDT:USDT",
+]
+exchange_name = "mexc"
 tf = '15m'
-train_start_date = "2023-01-01 00:00:00"
+train_start_date = "2022-01-01 00:00:00"
 train_end_date = "2023-12-31 00:00:00"
 test_start_date = "2023-12-31 00:00:00"
 
@@ -162,6 +166,7 @@ class Strategy():
         try:
             df = self.df
             if df is not None:
+                start_date = str(df.index.min())
                 total_trades = df.order_number.max()
                 final_wallet_amount = df.loc[df["open_long_signal"], "wallet"].tail(1)
                 total_profit = final_wallet_amount - self.initial_wallet
@@ -172,7 +177,7 @@ class Strategy():
                 hold_profit = (
                     df.sort_index().iloc[-1]["open"] - df.sort_index().iloc[0]["open"]
                               ) / df.sort_index().iloc[0]["open"] * 100
-
+                winrate = sum(df["trade_result"] > 0) / total_trades
                 result_df = pd.DataFrame(
                     {
                         "params": str(self.params),
@@ -183,7 +188,9 @@ class Strategy():
                         "avg_trade_profit_perc": avg_trade_profit_perc,
                         "avg_trade_profit": avg_trade_profit,
                         "max_drawdown": max_drawdown,
-                        "hold_profit": hold_profit
+                        "hold_profit": hold_profit,
+                        "winrate": winrate,
+                        "start_date": start_date
                     }
                 )
 
@@ -196,7 +203,7 @@ class Strategy():
             self.result_df = None
 
 
-def execute_strategy(batch):
+def execute_strategy(batch, pair):
     try:
         results = []
         for params in batch:
@@ -231,8 +238,8 @@ def execute_strategy(batch):
 def main():
     fast_ma = [*np.arange(5, 15, 1), *np.arange(15, 50, 5)]
     slow_ma = np.arange(50, 150, 5)
-    sigma_open = np.arange(1, 3, 0.1)
-    sigma_close = np.arange(1, 3, 0.1)
+    sigma_open = np.arange(2, 3, 0.1)
+    sigma_close = np.arange(2, 3, 0.1)
     #fast_ma = [*np.arange(5, 6, 1)]
     #slow_ma = np.arange(60, 70, 5)
     #sigma_open = np.arange(2, 3, 0.2)
@@ -242,21 +249,22 @@ def main():
 
     batch_size = 50  # or another number that works well for your setup
     param_batches = [param_combinations[i:i + batch_size] for i in range(0, len(param_combinations), batch_size)]
-    progress_bar = tqdm(total=len(param_combinations))
 
-    result_dfs = []
+    for pair in pair_list:
+        progress_bar = tqdm(total=len(param_combinations))
+        result_dfs = []
 
-    with ProcessPoolExecutor() as executor:
-        futures = {executor.submit(execute_strategy, batch): batch for batch in param_batches}
+        with ProcessPoolExecutor() as executor:
+            futures = {executor.submit(execute_strategy, batch, pair): batch for batch in param_batches}
 
-        for future in as_completed(futures):
-            result_dfs.extend(future.result())
-            progress_bar.update(batch_size)
+            for future in as_completed(futures):
+                result_dfs.extend(future.result())
+                progress_bar.update(batch_size)
 
-    progress_bar.close()
-    pd.concat(result_dfs).to_csv(
-        f"{pair.split('/')[0]}_{exchange_name}_{tf}_{train_start_date.split(' ')[0]}_{train_end_date.split(' ')[0]}_2.csv"
-    )
+        progress_bar.close()
+        pd.concat(result_dfs).to_csv(
+            f"{pair.split('/')[0]}_{exchange_name}_{tf}_{train_start_date.split(' ')[0]}_{train_end_date.split(' ')[0]}_2.csv"
+        )
 
 
 if __name__ == "__main__":

@@ -20,6 +20,10 @@ class ExchangeDataManager:
             "ccxt_object": ccxt.binance(config={'enableRateLimit': True}),
             "limit_size_request": 1000
         },
+        "mexc": {
+            "ccxt_object": ccxt.mexc(config={'enableRateLimit': True}),
+            "limit_size_request": 1000
+        },
         "binanceusdm": {
             "ccxt_object": ccxt.binanceusdm(config={'enableRateLimit': True}),
             "limit_size_request": 1000
