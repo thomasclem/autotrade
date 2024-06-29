@@ -1,0 +1,41 @@
+{
+  "strategy":{
+    "mrat": {
+      "ETH/USDT": {
+        "type": "market",
+        "use_long": true,
+        "use_short": false,
+        "use_tp": true,
+        "margin_mode": "isolated",
+        "equity_invest_ptc": 1,
+        "leverage": 2,
+        "start_amount": 500,
+        "timeframe": "1h",
+        "ohlcv_window": 51,
+        "fast_ma": 7,
+        "slow_ma": 50,
+        "open_std_alpha": 2.22,
+        "close_std_alpha": 2.22,
+        "tp_pct" : 0.06
+      }
+    },
+    "nadaraya_watson_envelope": {
+      "API3/USDT": {
+        "type": "market",
+        "use_long": true,
+        "use_short": false,
+        "use_tp": false,
+        "margin_mode": "isolated",
+        "equity_invest_ptc": 1,
+        "leverage": 1,
+        "start_amount": 500,
+        "timeframe": "1h",
+        "ohlcv_window": 9,
+        "lookback_window": 8,
+        "relative_weighting": 5.0,
+        "start_regression_bar": 20,
+        "tp_pct" : 0.06
+      }
+    }
+  }
+}
